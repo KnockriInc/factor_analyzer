@@ -15,6 +15,7 @@ import scipy as sp
 from scipy.optimize import minimize
 from scipy.stats import chi2, pearsonr
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.decomposition import PCA, TruncatedSVD
 from sklearn.utils import check_array
 from sklearn.utils.extmath import randomized_svd
 from sklearn.utils.validation import check_is_fitted
@@ -22,11 +23,13 @@ from sklearn.utils.validation import check_is_fitted
 from .rotator import OBLIQUE_ROTATIONS, POSSIBLE_ROTATIONS, Rotator
 from .utils import corr, impute_values, partial_correlations, smc
 
-POSSIBLE_SVDS = ['randomized', 'lapack']
+POSSIBLE_SVDS_PRINCIPAL = ['randomized', 'lapack']
+POSSIBLE_SVDS_PCA = ['randomized', 'arpack', 'full', 'auto']
+POSSIBLE_SVDS_LSA = ['randomized', 'arpack']
 
 POSSIBLE_IMPUTATIONS = ['mean', 'median', 'drop']
 
-POSSIBLE_METHODS = ['ml', 'mle', 'uls', 'minres', 'principal']
+POSSIBLE_METHODS = ['ml', 'mle', 'uls', 'minres', 'principal', 'pca', 'lsa']
 
 
 def calculate_kmo(x):
@@ -118,7 +121,8 @@ class FactorAnalyzer(BaseEstimator, TransformerMixin):
     """
     A FactorAnalyzer class, which -
         (1) Fits a factor analysis model using minres, maximum likelihood,
-            or principal factor extraction and returns the loading matrix
+            principal factor extraction, pricipal component analysis or 
+            latent semantic analysis and returns the loading matrix
         (2) Optionally performs a rotation, with method including:
 
             (a) varimax (orthogonal rotation)
@@ -152,9 +156,9 @@ class FactorAnalyzer(BaseEstimator, TransformerMixin):
 
         Defaults to 'promax'.
 
-    method : {'minres', 'ml', 'principal'}, optional
-        The fitting method to use, either MINRES or
-        Maximum Likelihood.
+    method : {'minres', 'ml', 'principal', 'pca', 'lsa'}, optional
+        The fitting method to use, either MINRES,
+        Maximum Likelihood, Principal, PCA, or LSA.
         Defaults to 'minres'.
     use_smc : bool, optional
         Whether to use squared multiple correlation
@@ -173,8 +177,9 @@ class FactorAnalyzer(BaseEstimator, TransformerMixin):
         Set to true if the `data` is the correlation
         matrix.
         Defaults to False.
-    svd_method : {‘lapack’, ‘randomized’}
-        The SVD method to use when ``method='principal'``.
+    svd_method : {‘auto’, ‘full’, ‘arpack’, ‘lapack’, ‘randomized’}
+        The SVD method to use when ``method='principal'``
+        ``method='pca'`` or ``method='lsa'``.
         If 'lapack', use standard SVD from ``scipy.linalg``.
         If 'randomized', use faster ``randomized_svd``
         function from scikit-learn. The latter should only
@@ -294,12 +299,25 @@ class FactorAnalyzer(BaseEstimator, TransformerMixin):
             raise ValueError(f"The imputation must be one of the following: {POSSIBLE_IMPUTATIONS}")
 
         self.svd_method = self.svd_method.lower() if isinstance(self.svd_method, str) else self.svd_method
-        if self.svd_method not in POSSIBLE_SVDS:
-            raise ValueError(f"The SVD method must be one of the following: {POSSIBLE_SVDS}")
 
-        if self.method == 'principal' and self.is_corr_matrix:
-            raise ValueError('The principal method is only implemented using '
-                             'the full data set, not the correlation matrix.')
+        if self.method == 'principal':
+            if self.svd_method not in POSSIBLE_SVDS_PRINCIPAL:
+                raise ValueError(f"The SVD method must be one of the following: {POSSIBLE_SVDS_PRINCIPAL}")
+            if self.is_corr_matrix:
+                raise ValueError('The principal method is only implemented using '
+                                'the full data set, not the correlation matrix.')
+        elif self.method == 'pca':
+            if self.svd_method not in POSSIBLE_SVDS_PCA:
+                raise ValueError(f"The SVD method must be one of the following: {POSSIBLE_SVDS_PCA}")
+            if self.is_corr_matrix:
+                raise ValueError('The pca method is only implemented using '
+                                'the full data set, not the correlation matrix.')
+        elif self.method == 'lsa':
+            if self.svd_method not in POSSIBLE_SVDS_LSA:
+                raise ValueError(f"The SVD method must be one of the following: {POSSIBLE_SVDS_LSA}")
+            if self.is_corr_matrix:
+                raise ValueError('The lsa method is only implemented using '
+                                'the full data set, not the correlation matrix.')
 
         self.rotation_kwargs = {} if self.rotation_kwargs is None else self.rotation_kwargs
 
@@ -468,6 +486,68 @@ class FactorAnalyzer(BaseEstimator, TransformerMixin):
 
         return np.dot(np.diag(np.sqrt(solution)), loadings)
 
+    def _fit_pca(self, X):
+        """
+        Fit the factor analysis model using a latent
+        semantic analysis solution.
+
+        Parameters
+        ----------
+        X : array-like
+            The full data set.
+
+        Returns
+        -------
+        loadings : numpy array
+            The factor loadings matrix.
+        """
+        X = X.copy().astype(float)
+
+        # if the number of rows is less than the number of columns,
+        # warn the user that the number of factors will be constrained
+        nrows, ncols = X.shape
+        if nrows < ncols and self.n_factors >= nrows:
+            warnings.warn('The number of factors will be '
+                          'constrained to min(n_samples, n_features)'
+                          '={}.'.format(min(nrows, ncols)))
+
+        pca = PCA(n_components=self.n_factors, svd_solver=self.svd_method)
+        pca.fit(X)
+        loadings = pca.components_.copy().T
+        self.explained_variance_ = pca.explained_variance_.copy()
+        return loadings
+
+    def _fit_lsa(self, X):
+        """
+        Fit the factor analysis model using a latent
+        semantic analysis solution.
+
+        Parameters
+        ----------
+        X : array-like
+            The full data set.
+
+        Returns
+        -------
+        loadings : numpy array
+            The factor loadings matrix.
+        """
+        X = X.copy().astype(float)
+
+        # if the number of rows is less than the number of columns,
+        # warn the user that the number of factors will be constrained
+        nrows, ncols = X.shape
+        if nrows < ncols and self.n_factors >= nrows:
+            warnings.warn('The number of factors will be '
+                          'constrained to min(n_samples, n_features)'
+                          '={}.'.format(min(nrows, ncols)))
+
+        tsvd = TruncatedSVD(n_components=self.n_factors, algorithm=self.svd_method, n_iter=5, random_state=None)
+        tsvd.fit(X)
+        loadings = tsvd.components_.copy().T
+        self.explained_variance_ = tsvd.explained_variance_.copy()
+        return loadings
+    
     def _fit_principal(self, X):
         """
         Fit the factor analysis model using a principal
@@ -498,7 +578,7 @@ class FactorAnalyzer(BaseEstimator, TransformerMixin):
         # perform the randomized singular value decomposition
         if self.svd_method == 'randomized':
             U, S, V = randomized_svd(X, self.n_factors)
-        # otherwise, perform the full SVD
+        # otherwise, perform the full SVD assuming self.svd_method == 'lapack'
         else:
             U, S, V = np.linalg.svd(X, full_matrices=False)
 
@@ -641,6 +721,10 @@ class FactorAnalyzer(BaseEstimator, TransformerMixin):
         # fit factor analysis model
         if self.method == 'principal':
             loadings = self._fit_principal(X)
+        elif self.method == 'pca':
+            loadings = self._fit_pca(X)
+        elif self.method == 'lsa':
+            loadings = self._fit_lsa(X)
         else:
             loadings = self._fit_factor_analysis(corr_mtx)
 
@@ -682,15 +766,15 @@ class FactorAnalyzer(BaseEstimator, TransformerMixin):
                 structure = np.dot(loadings, phi) if self.rotation in OBLIQUE_ROTATIONS else None
 
         # resort the factors according to their variance,
-        # unless the method is principal
-        if self.method != 'principal':
+        # unless the method is principal or lsa
+        if self.method not in  ['principal','pca','lsa']:
             variance = self._get_factor_variance(loadings)[0]
             new_order = list(reversed(np.argsort(variance)))
             loadings = loadings[:, new_order].copy()
         
-        # if the structure matrix exists, reorder
-        if structure is not None: 
-            structure = structure[:, new_order].copy()
+            # if the structure matrix exists, reorder
+            if structure is not None: 
+                structure = structure[:, new_order].copy()
         
         self.phi_ = phi
         self.structure_ = structure
